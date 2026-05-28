@@ -189,7 +189,7 @@ with tab3:
                 return ""
 
             st.dataframe(
-                summary.style.applymap(highlight_result, subset=["Ergebnis"]),
+                summary.style.map(highlight_result, subset=["Ergebnis"]),
                 use_container_width=True
             )
 
