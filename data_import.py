@@ -24,11 +24,12 @@ COLUMN_MAPPING = {
     "zeitraum": "Abrechnungsperiode",
     "periode": "Abrechnungsperiode",
     "brennstoff kwh": "Brennstoff_kWh",
-    "brennstoff kw/h": "Brennstoff_kWh",
+    "verbrauch kwh": "Brennstoff_kWh",
+    "energieverbrauch kwh": "Brennstoff_kWh",
+    "brennstoff kw/h": "Brennstoff_kW",
     "brennstoff kw": "Brennstoff_kW",
     "leistung brennstoff": "Brennstoff_kW",
-    "verbrauch kwh": "Brennstoff_kWh",
-    "energieverbrauch": "Brennstoff_kWh",
+    "energieverbrauch": "Brennstoff_kW",
     "betriebsstunden": "Betriebsstunden",
     "vollbenutzungsstunden": "Betriebsstunden",
     "brennstoffkosten": "Brennstoffkosten",
@@ -50,9 +51,10 @@ def parse_german_number(value):
     """Parse German number format (1.234,56 €) to float.
     
     Handles:
-    - 96.168 (German thousands separator) -> 96168
+    - 96.168 (German thousands separator, 3 digits after dot) -> 96168
     - 1.234,56 -> 1234.56
     - 13.232,82 -> 13232.82
+    - 104.343 -> 104343
     """
     if pd.isna(value):
         return 0.0
@@ -72,12 +74,11 @@ def parse_german_number(value):
         s = s.replace(',', '.')
     elif '.' in s:
         # Ambiguous: could be 96.168 (=96168) or 96.5 (=96.5)
-        # Heuristic: if exactly 3 digits after dot and no other dots -> thousands separator
+        # Heuristic: if exactly 3 digits after dot -> thousands separator
         parts = s.split('.')
         if len(parts) == 2 and len(parts[1]) == 3 and len(parts[0]) >= 1:
-            # 96.168 -> 96168 (thousands separator)
+            # 96.168 -> 96168, 104.343 -> 104343
             s = s.replace('.', '')
-        # else: 96.5 stays as 96.5 (decimal)
     try:
         return float(s)
     except (ValueError, TypeError):
@@ -96,24 +97,24 @@ def parse_leistung(value):
     return 0.0
 
 
-def detect_energy_unit(df):
-    """Detect whether the energy column is in kWh or kW.
+def detect_energy_column_type(df, original_cols):
+    """Detect whether energy data is in kW or kWh based on column headers.
+    
+    'Brennstoff KW/h' = kW (Leistung, braucht Betriebsstunden)
+    'Brennstoff kWh' = kWh (Arbeit, direkt nutzbar)
     
     Returns:
-        'kWh' if values are energy (kWh)
-        'kW' if values appear to be power (kW) needing multiplication with hours
-        None if cannot determine
+        'kW' if values are power needing Betriebsstunden
+        'kWh' if values are energy directly usable
     """
-    # Check column name hints
-    for col in df.columns:
-        col_lower = str(col).strip().lower()
-        if 'kwh' in col_lower:
+    for col in original_cols:
+        col_lower = col.strip().lower()
+        # "kw/h" ist NICHT kWh - es ist kW (Leistung)!
+        if 'kw/h' in col_lower:
+            return 'kW'
+        if 'kwh' in col_lower and 'kw/h' not in col_lower:
             return 'kWh'
-        if col_lower in ['brennstoff kw', 'brennstoff kw/h', 'leistung brennstoff']:
-            # "kW/h" is often a misspelling of kWh in German context
-            # but could also mean kW (power)
-            return 'ambiguous'
-    return None
+    return 'kW'  # Default: assume kW (safer, forces user to enter Betriebsstunden)
 
 
 def map_columns(df):
@@ -134,39 +135,11 @@ def map_columns(df):
     return df
 
 
-def parse_abrechnungsperiode(value):
-    """Parse Abrechnungsperiode and extract start/end dates.
-    
-    Handles formats like:
-    - "01.01.2024 - 31.12.2024"
-    - "01.01.2024 bis 31.12.2024"
-    - "2024"
-    - "01/2024 - 12/2024"
-    
-    Returns the original string (for display) but validates it.
-    """
-    if pd.isna(value):
-        return None
-    s = str(value).strip()
-    if not s:
-        return None
-    return s
-
-
 def import_data(uploaded_file):
-    """Import and parse CSV or Excel file.
-    
-    Handles:
-    - Automatic separator detection (CSV)
-    - German number format (96.168 = 96168)
-    - Column name fuzzy matching
-    - Forward-fill for multi-period rows
-    - Detection of kW vs kWh in energy column
-    """
+    """Import and parse CSV or Excel file."""
     try:
         filename = uploaded_file.name.lower()
         if filename.endswith(".csv"):
-            # Try different separators
             content = uploaded_file.read().decode("utf-8", errors="replace")
             for sep in [";", ",", "\t", "|"]:
                 try:
@@ -178,24 +151,20 @@ def import_data(uploaded_file):
         else:
             df = pd.read_excel(uploaded_file)
 
-        # Store original column names for unit detection
+        # Store original column names for energy unit detection
         original_cols = list(df.columns)
+        energy_type = detect_energy_column_type(df, original_cols)
 
         # Map columns
         df = map_columns(df)
 
-        # Check if "Brennstoff KW/h" was the original header -> likely kWh in German notation
-        energy_unit_hint = None
-        for orig_col in original_cols:
-            col_lower = orig_col.strip().lower()
-            if 'kw/h' in col_lower or 'kwh' in col_lower:
-                energy_unit_hint = 'kWh'
-            elif col_lower == 'brennstoff kw' or col_lower == 'leistung kw brennstoff':
-                energy_unit_hint = 'kW'
+        # If energy type is kW, ensure column is named Brennstoff_kW (not kWh)
+        if energy_type == 'kW':
+            if "Brennstoff_kWh" in df.columns and "Brennstoff_kW" not in df.columns:
+                df = df.rename(columns={"Brennstoff_kWh": "Brennstoff_kW"})
 
-        # Store the detected unit hint in the dataframe attributes
-        if energy_unit_hint:
-            df.attrs['energy_unit_hint'] = energy_unit_hint
+        # Store energy type as attribute
+        df.attrs['energy_type'] = energy_type
 
         # Parse numeric columns
         numeric_cols = ["Brennstoff_kWh", "Brennstoff_kW", "Brennstoffkosten", "Wartung",
@@ -208,15 +177,6 @@ def import_data(uploaded_file):
 
         if "Leistung_kW" in df.columns:
             df["Leistung_kW"] = df["Leistung_kW"].apply(parse_leistung)
-
-        # If we have Brennstoff_kW but not Brennstoff_kWh, note it
-        # The app will handle the conversion with Betriebsstunden
-        if "Brennstoff_kW" in df.columns and "Brennstoff_kWh" not in df.columns:
-            df.attrs['needs_betriebsstunden'] = True
-
-        # Parse Abrechnungsperiode
-        if "Abrechnungsperiode" in df.columns:
-            df["Abrechnungsperiode"] = df["Abrechnungsperiode"].apply(parse_abrechnungsperiode)
 
         # Forward-fill site info for multi-period rows
         site_cols = ["Heizzentrale", "Brennstoffart", "Kessel", "Leistung_kW",
