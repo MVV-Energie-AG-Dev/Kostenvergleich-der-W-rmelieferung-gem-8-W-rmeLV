@@ -22,7 +22,7 @@ def calculate_preisbereinigung_gp(grundpreis_basis, fix_gp, preisindizes_gp):
         tuple: (bereinigter Preis, Formel-String mit eingesetzten Werten)
     """
     if not preisindizes_gp:
-        return grundpreis_basis, f"GP = {grundpreis_basis:.2f} € (keine Preisgleitklausel)"
+        return grundpreis_basis, f"GP = {grundpreis_basis:.2f} €/Monat (keine Preisgleitklausel)"
 
     summe = fix_gp
     formel_teile = [f"{fix_gp:.4f}"]
@@ -33,7 +33,7 @@ def calculate_preisbereinigung_gp(grundpreis_basis, fix_gp, preisindizes_gp):
             formel_teile.append(f"{idx['anteil']:.4f} × {idx['aktuell']:.1f}/{idx['basis']:.1f}")
 
     if summe == 0:
-        return grundpreis_basis, f"GP = {grundpreis_basis:.2f} € (Summe=0, unbereinigt)"
+        return grundpreis_basis, f"GP = {grundpreis_basis:.2f} €/Monat (Summe=0, unbereinigt)"
 
     result = grundpreis_basis * summe
     formel = f"GP = {grundpreis_basis:.2f} × ({' + '.join(formel_teile)}) = {result:.2f} €/Monat"
@@ -91,7 +91,7 @@ def calculate_kostenvergleich(df, params, site_params_dict=None):
     ust_satz = params["ust_satz"]
     nutzungsgrade = params["nutzungsgrade"]
     default_grundpreis = params["grundpreis_netto"]
-    default_arbeitspreis = params["arbeitspreis_netto"]  # ct/kWh
+    default_arbeitspreis = params["arbeitspreis_netto"]
     default_betriebsstunden = params.get("betriebsstunden", 0)
     fix_gp = params["fix_gp"]
     fix_ap = params["fix_ap"]
@@ -109,9 +109,9 @@ def calculate_kostenvergleich(df, params, site_params_dict=None):
         sp = site_params_dict.get(site, {})
 
         # Site-specific overrides
-        site_grundpreis = sp.get("grundpreis_netto", default_grundpreis) or default_grundpreis
-        site_arbeitspreis = sp.get("arbeitspreis_netto", default_arbeitspreis) or default_arbeitspreis
-        site_betriebsstunden = sp.get("betriebsstunden", default_betriebsstunden) or default_betriebsstunden
+        site_grundpreis = sp.get("grundpreis_netto") or default_grundpreis
+        site_arbeitspreis = sp.get("arbeitspreis_netto") or default_arbeitspreis
+        site_betriebsstunden = sp.get("betriebsstunden") or default_betriebsstunden
         site_fix_gp = sp.get("fix_gp", fix_gp)
         site_fix_ap = sp.get("fix_ap", fix_ap)
         site_preisindizes_gp = sp.get("preisindizes_gp", preisindizes_gp)
@@ -128,7 +128,6 @@ def calculate_kostenvergleich(df, params, site_params_dict=None):
             durchschnitt_verbrauch = verbrauch_values.mean() if len(verbrauch_values) > 0 else 0
             anzahl_zeitraeume = len(verbrauch_values)
         elif brennstoff_kw_col and site_betriebsstunden > 0:
-            # Convert kW to kWh using Betriebsstunden
             kw_values = group[brennstoff_kw_col].dropna()
             kw_values = kw_values[kw_values > 0]
             kwh_values = kw_values * site_betriebsstunden
@@ -139,7 +138,7 @@ def calculate_kostenvergleich(df, params, site_params_dict=None):
             anzahl_zeitraeume = 0
 
         # Kosten des letzten Abrechnungszeitraums
-        last_row = group.iloc[-1]  # Last row = last period
+        last_row = group.iloc[-1]
         for _, r in group.iterrows():
             if r.get("Brennstoffkosten", 0) and r["Brennstoffkosten"] > 0:
                 last_row = r
@@ -149,7 +148,6 @@ def calculate_kostenvergleich(df, params, site_params_dict=None):
         schornsteinfeger = last_row.get("Schornsteinfeger", 0) or 0
         betriebsstrom = last_row.get("Betriebsstrom", 0) or 0
 
-        # Durchschnittspreis letzter Abrechnungszeitraum
         last_verbrauch = last_row.get("Brennstoff_kWh", 0) or 0
         if last_verbrauch == 0 and brennstoff_kw_col and site_betriebsstunden > 0:
             last_kw = last_row.get("Brennstoff_kW", 0) or 0
@@ -174,14 +172,14 @@ def calculate_kostenvergleich(df, params, site_params_dict=None):
             waermemenge, warmwasser_aktiv, heizflaeche, site_ww_kwh_pro_m2
         )
 
-        # Grundkosten (preisbereinigt) §10
+        # Grundkosten (preisbereinigt)
         gp_bereinigt, formel_gp = calculate_preisbereinigung_gp(
             site_grundpreis, site_fix_gp, site_preisindizes_gp
         )
         grundkosten_netto_jahr = gp_bereinigt * 12
         grundkosten_brutto = grundkosten_netto_jahr * (1 + ust_satz)
 
-        # Arbeitskosten (preisbereinigt) §10
+        # Arbeitskosten (preisbereinigt)
         ap_bereinigt, formel_ap = calculate_preisbereinigung_ap(
             site_arbeitspreis, site_fix_ap, site_preisindizes_ap
         )
@@ -195,7 +193,7 @@ def calculate_kostenvergleich(df, params, site_params_dict=None):
         bestanden = kosten_waermelieferung_brutto <= betriebskosten_bisherig
         differenz = betriebskosten_bisherig - kosten_waermelieferung_brutto
 
-        # Abrechnungsperioden sammeln
+        # Abrechnungsperioden
         perioden = []
         if "Abrechnungsperiode" in group.columns:
             perioden = group["Abrechnungsperiode"].dropna().tolist()
@@ -228,7 +226,7 @@ def calculate_kostenvergleich(df, params, site_params_dict=None):
             "Arbeitskosten_brutto": round(arbeitskosten_brutto, 2),
             "Kosten_Waermelieferung_brutto": round(kosten_waermelieferung_brutto, 2),
             "Differenz_Euro": round(differenz, 2),
-            "Ergebnis": "✅ §8 erfüllt" if bestanden else "❌ §8 nicht erfüllt",
+            "Ergebnis": "\u2705 \u00a78 erf\u00fcllt" if bestanden else "\u274c \u00a78 nicht erf\u00fcllt",
         })
 
     return pd.DataFrame(results)
