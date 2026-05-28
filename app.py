@@ -32,6 +32,41 @@ def load_project(name):
         return json.load(f)
 
 
+def _apply_sidebar_params(params=None):
+    """Sidebar-Parameter aus einem Projekt-Dict in den Session State laden.
+    Wird ohne Argument aufgerufen, um die Defaults zu setzen."""
+    p = params or {}
+    st.session_state["sb_ust"] = float(p.get("ust_satz", 0.19) * 100)
+    st.session_state["sb_bst"] = max(0, int(p.get("betriebsstunden", 0) or 0))
+    st.session_state["sb_ng_bw"] = max(0.0, float(p.get("ng_brennwert", 96.0)))
+    st.session_state["sb_ng_nt"] = max(0.0, float(p.get("ng_niedertemperatur", 84.9)))
+    st.session_state["sb_ng_sk"] = max(0.0, float(p.get("ng_standardkessel", 80.0)))
+    st.session_state["sb_ng_kt"] = max(0.0, float(p.get("ng_konstanttemperatur", 78.0)))
+    st.session_state["sb_ww"] = max(0.0, float(p.get("ww_kwh_pro_m2", 20.0)))
+    st.session_state["sb_gp"] = max(0.0, float(p.get("grundpreis_netto", 0.0) or 0.0))
+    st.session_state["sb_ap"] = max(0.0, float(p.get("arbeitspreis_netto", 0.0) or 0.0))
+    st.session_state["sb_fix_gp"] = max(0.0, float(p.get("fix_gp", 0.0)))
+    st.session_state["sb_fix_ap"] = max(0.0, float(p.get("fix_ap", 0.0)))
+    pidx_list = p.get("preisindizes_gp", [])
+    apidx_list = p.get("preisindizes_ap", [])
+    st.session_state["sb_pidx_count"] = max(0, int(p.get("preisindex_count", len(pidx_list)) or 0))
+    for i in range(5):
+        gp_idx = pidx_list[i] if i < len(pidx_list) else {}
+        ap_idx = apidx_list[i] if i < len(apidx_list) else {}
+        st.session_state[f"sb_gi_{i}"] = float(gp_idx.get("anteil", 0.0))
+        st.session_state[f"sb_gpib_{i}"] = max(0.0, float(gp_idx.get("basis", 100.0)))
+        st.session_state[f"sb_gpi_{i}"] = max(0.0, float(gp_idx.get("aktuell", 100.0)))
+        st.session_state[f"sb_ai_{i}"] = float(ap_idx.get("anteil", 0.0))
+        st.session_state[f"sb_apib_{i}"] = max(0.0, float(ap_idx.get("basis", 100.0)))
+        st.session_state[f"sb_api_{i}"] = max(0.0, float(ap_idx.get("aktuell", 100.0)))
+
+
+# Sidebar-Defaults beim allerersten Start initialisieren
+if "sb_initialized" not in st.session_state:
+    _apply_sidebar_params()
+    st.session_state["sb_initialized"] = True
+
+
 # --- Projekt-Verwaltung ---
 st.title("Kostenvergleich der Wärmelieferung gemäß §8 WärmeLV")
 
@@ -52,6 +87,7 @@ with proj_col3:
             st.session_state["manual_data"] = []
             st.session_state.pop("results", None)
             st.session_state["site_params"] = {}
+            _apply_sidebar_params()  # Sidebar auf Defaults zurücksetzen
             st.rerun()
 with proj_col4:
     if st.button("📂 Laden") and selected_project != "-- Neues Projekt --":
@@ -62,6 +98,7 @@ with proj_col4:
         st.session_state["site_params"] = loaded.get("site_params", {})
         if loaded.get("results"):
             st.session_state["results"] = pd.DataFrame(loaded["results"])
+        _apply_sidebar_params(loaded.get("params", {}))  # Sidebar-Parameter aus Projekt laden
         st.rerun()
 
 if st.session_state.get("current_project"):
@@ -74,44 +111,44 @@ st.sidebar.header("⚙️ Default-Parameter")
 st.sidebar.markdown("*Gelten für alle Standorte, sofern nicht individuell überschrieben*")
 
 st.sidebar.subheader("Allgemein")
-ust_satz = st.sidebar.number_input("USt-Satz (%)", value=19.0, step=0.1) / 100
-default_betriebsstunden = st.sidebar.number_input("Betriebsstunden (h/a)", value=0, step=100,
+ust_satz = st.sidebar.number_input("USt-Satz (%)", min_value=0.0, step=0.1, key="sb_ust") / 100
+default_betriebsstunden = st.sidebar.number_input("Betriebsstunden (h/a)", min_value=0, step=100, key="sb_bst",
     help="Nur nötig wenn Verbrauch in kW statt kWh angegeben ist. kWh = kW × Betriebsstunden")
 
 st.sidebar.subheader("Jahresnutzungsgrade Altanlage (%)")
 nutzungsgrade = {
-    "Brennwert": st.sidebar.number_input("Brennwert", value=96.0, step=0.5) / 100,
-    "Niedertemperatur": st.sidebar.number_input("Niedertemperatur", value=84.9, step=0.5) / 100,
-    "Standardkessel": st.sidebar.number_input("Standardkessel", value=80.0, step=0.5) / 100,
-    "Konstanttemperatur": st.sidebar.number_input("Konstanttemperatur", value=78.0, step=0.5) / 100,
+    "Brennwert": st.sidebar.number_input("Brennwert", min_value=0.0, step=0.5, key="sb_ng_bw") / 100,
+    "Niedertemperatur": st.sidebar.number_input("Niedertemperatur", min_value=0.0, step=0.5, key="sb_ng_nt") / 100,
+    "Standardkessel": st.sidebar.number_input("Standardkessel", min_value=0.0, step=0.5, key="sb_ng_sk") / 100,
+    "Konstanttemperatur": st.sidebar.number_input("Konstanttemperatur", min_value=0.0, step=0.5, key="sb_ng_kt") / 100,
 }
 
 st.sidebar.subheader("Warmwasser")
-ww_kwh_pro_m2 = st.sidebar.number_input("WW-Pauschale (kWh/m²/a)", value=20.0, step=1.0)
+ww_kwh_pro_m2 = st.sidebar.number_input("WW-Pauschale (kWh/m²/a)", min_value=0.0, step=1.0, key="sb_ww")
 
 st.sidebar.subheader("Wärmelieferung – Angebotspreise (§10)")
-default_grundpreis = st.sidebar.number_input("GPB – Grundpreis Basis (€/Monat netto)", value=0.0, step=10.0)
-default_arbeitspreis = st.sidebar.number_input("APB – Arbeitspreis Basis (ct/kWh netto)", value=0.0, step=0.1)
+default_grundpreis = st.sidebar.number_input("GPB – Grundpreis Basis (€/Monat netto)", min_value=0.0, step=10.0, key="sb_gp")
+default_arbeitspreis = st.sidebar.number_input("APB – Arbeitspreis Basis (ct/kWh netto)", min_value=0.0, step=0.1, key="sb_ap")
 
 st.sidebar.subheader("Preisgleitklausel")
 st.sidebar.latex(r"GP = GPB \times (FixGP + G_1 \cdot \frac{GP_1}{GP_{1B}} + \ldots)")
 st.sidebar.latex(r"AP = APB \times (FixAP + A_1 \cdot \frac{AP_1}{AP_{1B}} + \ldots)")
 
-fix_gp = st.sidebar.number_input("FixGP", value=0.0, step=0.01, format="%.4f")
-fix_ap = st.sidebar.number_input("FixAP", value=0.0, step=0.01, format="%.4f")
+fix_gp = st.sidebar.number_input("FixGP", min_value=0.0, step=0.01, format="%.4f", key="sb_fix_gp")
+fix_ap = st.sidebar.number_input("FixAP", min_value=0.0, step=0.01, format="%.4f", key="sb_fix_ap")
 
-preisindex_count = st.sidebar.number_input("Anzahl Preisindizes", value=0, min_value=0, max_value=5, step=1)
+preisindex_count = st.sidebar.number_input("Anzahl Preisindizes", min_value=0, max_value=5, step=1, key="sb_pidx_count")
 preisindizes_gp = []
 preisindizes_ap = []
 for i in range(int(preisindex_count)):
     st.sidebar.markdown(f"**Index {i+1}**")
-    gi = st.sidebar.number_input(f"G{i+1}", value=0.0, key=f"gi_{i}", format="%.4f")
-    gpi_basis = st.sidebar.number_input(f"GP{i+1}B (Basis)", value=100.0, key=f"gpib_{i}")
-    gpi_aktuell = st.sidebar.number_input(f"GP{i+1} (Aktuell)", value=100.0, key=f"gpi_{i}")
+    gi = st.sidebar.number_input(f"G{i+1}", step=0.0001, format="%.4f", key=f"sb_gi_{i}")
+    gpi_basis = st.sidebar.number_input(f"GP{i+1}B (Basis)", min_value=0.0, step=1.0, key=f"sb_gpib_{i}")
+    gpi_aktuell = st.sidebar.number_input(f"GP{i+1} (Aktuell)", min_value=0.0, step=1.0, key=f"sb_gpi_{i}")
     preisindizes_gp.append({"anteil": gi, "basis": gpi_basis, "aktuell": gpi_aktuell})
-    ai = st.sidebar.number_input(f"A{i+1}", value=0.0, key=f"ai_{i}", format="%.4f")
-    api_basis = st.sidebar.number_input(f"AP{i+1}B (Basis)", value=100.0, key=f"apib_{i}")
-    api_aktuell = st.sidebar.number_input(f"AP{i+1} (Aktuell)", value=100.0, key=f"api_{i}")
+    ai = st.sidebar.number_input(f"A{i+1}", step=0.0001, format="%.4f", key=f"sb_ai_{i}")
+    api_basis = st.sidebar.number_input(f"AP{i+1}B (Basis)", min_value=0.0, step=1.0, key=f"sb_apib_{i}")
+    api_aktuell = st.sidebar.number_input(f"AP{i+1} (Aktuell)", min_value=0.0, step=1.0, key=f"sb_api_{i}")
     preisindizes_ap.append({"anteil": ai, "basis": api_basis, "aktuell": api_aktuell})
 
 # Speichern
@@ -121,9 +158,22 @@ if st.sidebar.button("💾 Projekt speichern"):
         project_data = {
             "name": st.session_state["current_project"],
             "created": datetime.now().isoformat(),
-            "params": {"ust_satz": ust_satz, "grundpreis_netto": default_grundpreis,
-                       "arbeitspreis_netto": default_arbeitspreis, "betriebsstunden": default_betriebsstunden,
-                       "fix_gp": fix_gp, "fix_ap": fix_ap, "ww_kwh_pro_m2": ww_kwh_pro_m2},
+            "params": {
+                "ust_satz": ust_satz,
+                "grundpreis_netto": default_grundpreis,
+                "arbeitspreis_netto": default_arbeitspreis,
+                "betriebsstunden": default_betriebsstunden,
+                "fix_gp": fix_gp,
+                "fix_ap": fix_ap,
+                "ww_kwh_pro_m2": ww_kwh_pro_m2,
+                "ng_brennwert": st.session_state.get("sb_ng_bw", 96.0),
+                "ng_niedertemperatur": st.session_state.get("sb_ng_nt", 84.9),
+                "ng_standardkessel": st.session_state.get("sb_ng_sk", 80.0),
+                "ng_konstanttemperatur": st.session_state.get("sb_ng_kt", 78.0),
+                "preisindex_count": int(st.session_state.get("sb_pidx_count", 0) or 0),
+                "preisindizes_gp": preisindizes_gp,
+                "preisindizes_ap": preisindizes_ap,
+            },
             "imported_data": st.session_state.get("imported_data").to_dict(orient="records") if st.session_state.get("imported_data") is not None else None,
             "manual_data": st.session_state.get("manual_data", []),
             "site_params": st.session_state.get("site_params", {}),
@@ -222,6 +272,42 @@ with tab1:
                         site_fix_ap = st.number_input(
                             "FixAP", value=float(sp.get("fix_ap", fix_ap)),
                             step=0.01, format="%.4f", key=f"sfap_{site}")
+                        site_own_pidx = st.checkbox(
+                            "🔧 Eigene Preisindizes",
+                            value=bool(sp.get("own_preisindizes", False)),
+                            key=f"own_pidx_{site}",
+                            help="Eigene Preisindizes für diesen Standort verwenden (überschreibt Sidebar-Defaults)")
+
+                    # Per-Standort Preisindizes (volle Breite, nur wenn aktiviert)
+                    if site_own_pidx:
+                        st.markdown("**📊 Eigene Preisindizes für diesen Standort:**")
+                        sp_pidx_count = int(sp.get("preisindex_count", 0) if sp.get("own_preisindizes") else 0)
+                        site_pidx_count = st.number_input(
+                            "Anzahl Preisindizes", value=sp_pidx_count,
+                            min_value=0, max_value=5, step=1, key=f"sp_pidx_count_{site}")
+                        sp_gp_saved = sp.get("preisindizes_gp", []) if sp.get("own_preisindizes") else []
+                        sp_ap_saved = sp.get("preisindizes_ap", []) if sp.get("own_preisindizes") else []
+                        site_preisindizes_gp_own = []
+                        site_preisindizes_ap_own = []
+                        for j in range(int(site_pidx_count)):
+                            gp_j = sp_gp_saved[j] if j < len(sp_gp_saved) else {}
+                            ap_j = sp_ap_saved[j] if j < len(sp_ap_saved) else {}
+                            st.markdown(f"*Index {j+1}*")
+                            c_a, c_b, c_c, c_d, c_e, c_f = st.columns(6)
+                            gi_j = c_a.number_input(f"G{j+1}", value=float(gp_j.get("anteil", 0.0)), step=0.0001, format="%.4f", key=f"sp_gi_{site}_{j}")
+                            gpib_j = c_b.number_input(f"GP{j+1}B", value=float(gp_j.get("basis", 100.0)), min_value=0.0, step=1.0, key=f"sp_gpib_{site}_{j}")
+                            gpi_j = c_c.number_input(f"GP{j+1}", value=float(gp_j.get("aktuell", 100.0)), min_value=0.0, step=1.0, key=f"sp_gpi_{site}_{j}")
+                            ai_j = c_d.number_input(f"A{j+1}", value=float(ap_j.get("anteil", 0.0)), step=0.0001, format="%.4f", key=f"sp_ai_{site}_{j}")
+                            apib_j = c_e.number_input(f"AP{j+1}B", value=float(ap_j.get("basis", 100.0)), min_value=0.0, step=1.0, key=f"sp_apib_{site}_{j}")
+                            api_j = c_f.number_input(f"AP{j+1}", value=float(ap_j.get("aktuell", 100.0)), min_value=0.0, step=1.0, key=f"sp_api_{site}_{j}")
+                            site_preisindizes_gp_own.append({"anteil": gi_j, "basis": gpib_j, "aktuell": gpi_j})
+                            site_preisindizes_ap_own.append({"anteil": ai_j, "basis": apib_j, "aktuell": api_j})
+                        final_site_pidx_gp = site_preisindizes_gp_own
+                        final_site_pidx_ap = site_preisindizes_ap_own
+                    else:
+                        site_pidx_count = 0
+                        final_site_pidx_gp = preisindizes_gp
+                        final_site_pidx_ap = preisindizes_ap
 
                     # Save site params
                     st.session_state["site_params"][site] = {
@@ -232,8 +318,10 @@ with tab1:
                         "arbeitspreis_netto": site_ap if site_ap > 0 else None,
                         "fix_gp": site_fix_gp,
                         "fix_ap": site_fix_ap,
-                        "preisindizes_gp": preisindizes_gp,
-                        "preisindizes_ap": preisindizes_ap,
+                        "own_preisindizes": site_own_pidx,
+                        "preisindex_count": int(site_pidx_count),
+                        "preisindizes_gp": final_site_pidx_gp,
+                        "preisindizes_ap": final_site_pidx_ap,
                     }
 
             # Berechnung starten
