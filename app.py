@@ -1,27 +1,29 @@
 import streamlit as st
 import pandas as pd
 import io
+import json
+import os
+from datetime import datetime
 from calculation import calculate_kostenvergleich
 from data_import import import_data, parse_german_number
 
 st.set_page_config(page_title="Kostenvergleich §8 WärmeLV", layout="wide")
 st.title("Kostenvergleich der Wärmelieferung gemäß §8 WärmeLV")
-st.markdown("Bulk-Berechnung für mehrere Standorte")
+st.markdown("""
+**Regulatorischer Hintergrund:**  
+§8 WärmeLV schreibt vor, dass die Kosten der Wärmelieferung (§10) die bisherigen 
+Betriebskosten der Eigenversorgung (§9) nicht übersteigen dürfen.
+Dieses Tool berechnet beide Seiten und prüft die Einhaltung.
+""")
 
 # --- Sidebar: Anpassbare Parameter ---
-st.sidebar.header("Berechnungsparameter")
+st.sidebar.header("⚙️ Berechnungsparameter")
 
+st.sidebar.subheader("Allgemein")
 ust_satz = st.sidebar.number_input("USt-Satz (%)", value=19.0, step=0.1) / 100
 
-st.sidebar.subheader("Heizwerte (kWh/Einheit)")
-heizwerte = {
-    "Erdgas": st.sidebar.number_input("Erdgas (kWh/m³)", value=10.0, step=0.1),
-    "Heizöl": st.sidebar.number_input("Heizöl (kWh/l)", value=10.0, step=0.1),
-    "Pellets": st.sidebar.number_input("Pellets (kWh/kg)", value=4.9, step=0.1),
-    "Fernwärme": st.sidebar.number_input("Fernwärme (kWh/kWh)", value=1.0, step=0.1),
-}
-
-st.sidebar.subheader("Jahresnutzungsgrade (%)")
+st.sidebar.subheader("Jahresnutzungsgrade Altanlage (%)")
+st.sidebar.markdown("*BMVBS-Pauschalwerte oder individuell*")
 nutzungsgrade = {
     "Brennwert": st.sidebar.number_input("Brennwert", value=96.0, step=0.5) / 100,
     "Niedertemperatur": st.sidebar.number_input("Niedertemperatur", value=84.9, step=0.5) / 100,
@@ -29,12 +31,20 @@ nutzungsgrade = {
     "Konstanttemperatur": st.sidebar.number_input("Konstanttemperatur", value=78.0, step=0.5) / 100,
 }
 
-st.sidebar.subheader("Wärmelieferung - Preise")
-default_grundpreis = st.sidebar.number_input("Default Grundpreis (€/Monat netto)", value=0.0, step=10.0)
-default_arbeitspreis = st.sidebar.number_input("Default Arbeitspreis (ct/kWh netto)", value=0.0, step=0.1)
+st.sidebar.subheader("Warmwasser")
+st.sidebar.markdown("*Bei zentraler WW-Aufbereitung*")
+ww_kwh_pro_m2 = st.sidebar.number_input("WW-Pauschale (kWh/m²/a)", value=20.0, step=1.0,
+    help="Typischer Wert: 20-30 kWh/m²/a für zentrale Warmwasseraufbereitung")
 
-st.sidebar.subheader("Preisindizes")
-st.sidebar.markdown("Für Preisbereinigung (GP/AP-Formeln)")
+st.sidebar.subheader("Wärmelieferung – Angebotspreise (§10)")
+st.sidebar.markdown("*Preise des Wärmelieferanten (netto)*")
+default_grundpreis = st.sidebar.number_input("Grundpreis (€/Monat netto)", value=0.0, step=10.0,
+    help="Monatlicher Grundpreis der Wärmelieferung")
+default_arbeitspreis = st.sidebar.number_input("Arbeitspreis (ct/kWh netto)", value=0.0, step=0.1,
+    help="Arbeitspreis pro kWh gelieferter Wärme")
+
+st.sidebar.subheader("Preisgleitklausel (optional)")
+st.sidebar.markdown("*Für Preisbereinigung GP/AP-Formeln*")
 fix_gp = st.sidebar.number_input("FixGP (Fixanteil Grundpreis)", value=0.0, step=0.01, format="%.4f")
 fix_ap = st.sidebar.number_input("FixAP (Fixanteil Arbeitspreis)", value=0.0, step=0.01, format="%.4f")
 
@@ -55,7 +65,6 @@ for i in range(int(preisindex_count)):
 
 params = {
     "ust_satz": ust_satz,
-    "heizwerte": heizwerte,
     "nutzungsgrade": nutzungsgrade,
     "grundpreis_netto": default_grundpreis,
     "arbeitspreis_netto": default_arbeitspreis,
@@ -63,13 +72,19 @@ params = {
     "fix_ap": fix_ap,
     "preisindizes_gp": preisindizes_gp,
     "preisindizes_ap": preisindizes_ap,
+    "ww_kwh_pro_m2": ww_kwh_pro_m2,
 }
 
-# --- Main: Datenimport ---
-tab1, tab2, tab3 = st.tabs(["📁 Datenimport", "✏️ Manuelle Eingabe", "📊 Ergebnisse"])
+# --- Main Tabs ---
+tab1, tab2, tab3, tab4 = st.tabs(["📁 Datenimport", "✏️ Manuelle Eingabe", "📊 Ergebnisse", "💾 Speichern/Laden"])
 
 with tab1:
     st.header("Daten importieren")
+    st.markdown("""
+    Laden Sie eine CSV- oder Excel-Datei mit den Verbrauchsdaten hoch.  
+    Spalten werden automatisch erkannt. Mehrere Abrechnungszeiträume pro Standort 
+    werden als separate Zeilen mit gleichem Standortnamen erwartet.
+    """)
     uploaded_file = st.file_uploader("CSV oder Excel-Datei hochladen", type=["csv", "xlsx", "xls"])
 
     if uploaded_file:
@@ -100,7 +115,7 @@ with tab2:
         with col3:
             heizflaeche = st.number_input("Heizfläche (m²)", value=0.0)
 
-        st.markdown("**Abrechnungszeiträume**")
+        st.markdown("**Abrechnungszeiträume (bis zu 3)**")
         periods = []
         for p in range(3):
             st.markdown(f"Zeitraum {p+1}")
@@ -155,7 +170,13 @@ with tab2:
             st.rerun()
 
 with tab3:
-    st.header("Ergebnisse Kostenvergleich")
+    st.header("Ergebnisse Kostenvergleich §8 WärmeLV")
+
+    # Check if prices are set
+    if default_grundpreis == 0 and default_arbeitspreis == 0:
+        st.warning("⚠️ **Bitte Angebotspreise der Wärmelieferung in der Sidebar eingeben** "
+                   "(Grundpreis €/Monat und/oder Arbeitspreis ct/kWh), damit der Vergleich "
+                   "nach §10 WärmeLV durchgeführt werden kann.")
 
     # Combine data sources
     dfs = []
@@ -176,20 +197,28 @@ with tab3:
 
             # Summary table
             st.subheader("Übersicht")
+            st.markdown("""
+            | Spalte | Bedeutung |
+            |--------|-----------|
+            | **Betriebskosten bisher** | Kosten der Eigenversorgung nach §9 WärmeLV |
+            | **Kosten Wärmelieferung** | Kosten des Wärmelieferangebots nach §10 WärmeLV |
+            | **Differenz** | Positiv = Kostenersparnis durch WL, Negativ = WL teurer |
+            """)
+
             summary = results[["Heizzentrale", "Betriebskosten_bisherig_brutto",
-                             "Kosten_Waermelieferung_brutto", "Ergebnis"]].copy()
-            summary.columns = ["Standort", "Betriebskosten bisher (€/a)",
-                             "Kosten Wärmelieferung (€/a)", "Ergebnis"]
+                             "Kosten_Waermelieferung_brutto", "Differenz_Euro", "Ergebnis"]].copy()
+            summary.columns = ["Standort", "§9 Betriebskosten bisher (€/a)",
+                             "§10 Kosten Wärmelieferung (€/a)", "Differenz (€/a)", "Ergebnis §8"]
 
             def highlight_result(val):
-                if val == "✅ Bestanden":
+                if "erfüllt" in str(val) and "nicht" not in str(val):
                     return "background-color: #90EE90"
-                elif val == "❌ Nicht bestanden":
+                elif "nicht erfüllt" in str(val):
                     return "background-color: #FFB6C1"
                 return ""
 
             st.dataframe(
-                summary.style.map(highlight_result, subset=["Ergebnis"]),
+                summary.style.map(highlight_result, subset=["Ergebnis §8"]),
                 use_container_width=True
             )
 
@@ -197,16 +226,35 @@ with tab3:
             st.subheader("Detailansicht")
             for idx, row in results.iterrows():
                 with st.expander(f"{row['Heizzentrale']} - {row['Ergebnis']}"):
-                    c1, c2 = st.columns(2)
+                    st.markdown("---")
+                    c1, c2, c3 = st.columns(3)
                     with c1:
+                        st.markdown("**§9 Bisherige Versorgung**")
                         st.metric("Betriebskosten bisher", f"{row['Betriebskosten_bisherig_brutto']:.2f} €/a")
                         st.write(f"Ø Energieverbrauch: {row['Durchschnitt_Verbrauch_kWh']:.0f} kWh/a")
-                        st.write(f"Ø Wärmemenge: {row['Waermemenge_kWh']:.0f} kWh/a")
-                        st.write(f"Jahresnutzungsgrad: {row['Nutzungsgrad']*100:.1f}%")
+                        st.write(f"Anzahl Zeiträume: {row['Anzahl_Zeitraeume']}")
+                        st.write(f"Brennstoffpreis: {row['Preis_ct_kWh_Brennstoff']:.2f} ct/kWh")
+                        st.write(f"Verbrauchskosten: {row['Verbrauchskosten_S9']:.2f} €/a")
+                        st.write(f"Sonstige Kosten: {row['Sonstige_Betriebskosten_S9']:.2f} €/a")
                     with c2:
+                        st.markdown("**§10 Wärmelieferung**")
                         st.metric("Kosten Wärmelieferung", f"{row['Kosten_Waermelieferung_brutto']:.2f} €/a")
+                        st.write(f"Nutzungsgrad Altanlage: {row['Nutzungsgrad']*100:.1f}%")
+                        st.write(f"Wärmemenge Heizung: {row['Waermemenge_Heizung_kWh']:.0f} kWh/a")
+                        st.write(f"Wärmemenge gesamt: {row['Waermemenge_gesamt_kWh']:.0f} kWh/a")
+                        st.write(f"Warmwasser: {row['Warmwasser']}")
                         st.write(f"Grundkosten: {row['Grundkosten_brutto']:.2f} €/a")
                         st.write(f"Arbeitskosten: {row['Arbeitskosten_brutto']:.2f} €/a")
+                    with c3:
+                        st.markdown("**§8 Ergebnis**")
+                        differenz = row['Differenz_Euro']
+                        if differenz >= 0:
+                            st.metric("Ersparnis", f"{differenz:.2f} €/a", delta=f"{differenz:.2f}")
+                        else:
+                            st.metric("Mehrkosten", f"{abs(differenz):.2f} €/a", delta=f"{differenz:.2f}")
+                        st.write(f"Technologie: {row['Technologie']}")
+                        st.write(f"Brennstoffart: {row['Brennstoffart']}")
+                        st.write(f"Heizfläche: {row['Heizflaeche_m2']:.0f} m²")
 
             # Export
             st.subheader("Export")
@@ -223,3 +271,57 @@ with tab3:
                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
         st.info("Bitte importieren Sie Daten oder geben Sie Standorte manuell ein.")
+
+with tab4:
+    st.header("💾 Ergebnisse Speichern / Laden")
+    st.markdown("Speichern Sie den kompletten Berechnungsstand (Daten + Parameter + Ergebnisse) als JSON-Datei.")
+
+    col_save, col_load = st.columns(2)
+
+    with col_save:
+        st.subheader("Speichern")
+        if st.button("💾 Aktuellen Stand speichern"):
+            save_data = {
+                "timestamp": datetime.now().isoformat(),
+                "params": {
+                    "ust_satz": ust_satz,
+                    "grundpreis_netto": default_grundpreis,
+                    "arbeitspreis_netto": default_arbeitspreis,
+                    "fix_gp": fix_gp,
+                    "fix_ap": fix_ap,
+                    "ww_kwh_pro_m2": ww_kwh_pro_m2,
+                    "preisindizes_gp": preisindizes_gp,
+                    "preisindizes_ap": preisindizes_ap,
+                    "nutzungsgrade": {k: v for k, v in nutzungsgrade.items()},
+                },
+            }
+            if "imported_data" in st.session_state and st.session_state["imported_data"] is not None:
+                save_data["imported_data"] = st.session_state["imported_data"].to_dict(orient="records")
+            if st.session_state.get("manual_data"):
+                save_data["manual_data"] = st.session_state["manual_data"]
+            if "results" in st.session_state:
+                save_data["results"] = st.session_state["results"].to_dict(orient="records")
+
+            json_str = json.dumps(save_data, ensure_ascii=False, indent=2, default=str)
+            filename = f"kostenvergleich_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            st.download_button("📥 JSON herunterladen", json_str, filename, "application/json")
+
+    with col_load:
+        st.subheader("Laden")
+        uploaded_json = st.file_uploader("Gespeicherte JSON-Datei laden", type=["json"], key="json_upload")
+        if uploaded_json:
+            try:
+                loaded = json.loads(uploaded_json.read().decode("utf-8"))
+                st.success(f"Datei geladen (gespeichert am: {loaded.get('timestamp', 'unbekannt')})")
+
+                if "imported_data" in loaded:
+                    st.session_state["imported_data"] = pd.DataFrame(loaded["imported_data"])
+                if "manual_data" in loaded:
+                    st.session_state["manual_data"] = loaded["manual_data"]
+                if "results" in loaded:
+                    st.session_state["results"] = pd.DataFrame(loaded["results"])
+
+                st.info("Daten geladen. Wechseln Sie zum Tab 'Ergebnisse' um die Ergebnisse zu sehen, "
+                       "oder starten Sie eine neue Berechnung mit den geladenen Daten.")
+            except Exception as e:
+                st.error(f"Fehler beim Laden: {e}")
