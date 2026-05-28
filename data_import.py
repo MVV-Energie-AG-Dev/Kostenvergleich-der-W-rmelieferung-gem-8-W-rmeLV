@@ -128,7 +128,7 @@ def import_data(uploaded_file):
                     "Technologie", "Baujahr", "Warmwasser", "Heizflaeche_m2"]
         for col in site_cols:
             if col in df.columns:
-                df[col] = df[col].fillna(method="ffill")
+                df[col] = df[col].ffill()
 
         return df
     except Exception as e:
