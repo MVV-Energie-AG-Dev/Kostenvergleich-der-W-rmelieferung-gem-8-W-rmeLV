@@ -46,8 +46,36 @@ def calculate_preisbereinigung_ap(arbeitspreis_basis, fix_ap, preisindizes_ap):
     return arbeitspreis_basis * summe
 
 
+def calculate_warmwasser_anteil(waermemenge, warmwasser_aktiv, heizflaeche, ww_kwh_pro_m2=20.0):
+    """Berechne Warmwasseranteil gemäß WärmeLV.
+    
+    Bei zentraler Warmwasseraufbereitung wird ein pauschaler Anteil 
+    für Warmwasser hinzugerechnet (ca. 20 kWh/m²/a als Richtwert).
+    
+    Args:
+        waermemenge: Wärmemenge Heizung in kWh/a
+        warmwasser_aktiv: ob zentrale WW-Aufbereitung vorhanden
+        heizflaeche: beheizte Fläche in m²
+        ww_kwh_pro_m2: Warmwasser-Pauschale kWh pro m² und Jahr
+    
+    Returns:
+        Gesamtwärmemenge inkl. Warmwasser in kWh/a
+    """
+    if warmwasser_aktiv and heizflaeche > 0:
+        ww_anteil = heizflaeche * ww_kwh_pro_m2
+        return waermemenge + ww_anteil
+    return waermemenge
+
+
 def calculate_kostenvergleich(df, params):
-    """Calculate Kostenvergleich for all sites.
+    """Calculate Kostenvergleich gemäß §8 WärmeLV für alle Standorte.
+
+    Vergleich nach §8 WärmeLV:
+    1. Betriebskosten der bisherigen Versorgung (§9 WärmeLV)
+    2. Kosten der Wärmelieferung (§10 WärmeLV)
+    
+    Die Kosten der Wärmelieferung dürfen die bisherigen Betriebskosten
+    nicht übersteigen.
 
     Args:
         df: DataFrame with site data (multiple rows per site for different periods)
@@ -58,12 +86,13 @@ def calculate_kostenvergleich(df, params):
     """
     ust_satz = params["ust_satz"]
     nutzungsgrade = params["nutzungsgrade"]
-    grundpreis_netto = params["grundpreis_netto"]
-    arbeitspreis_netto = params["arbeitspreis_netto"]  # ct/kWh
+    default_grundpreis = params["grundpreis_netto"]
+    default_arbeitspreis = params["arbeitspreis_netto"]  # ct/kWh
     fix_gp = params["fix_gp"]
     fix_ap = params["fix_ap"]
     preisindizes_gp = params["preisindizes_gp"]
     preisindizes_ap = params["preisindizes_ap"]
+    ww_kwh_pro_m2 = params.get("ww_kwh_pro_m2", 20.0)
 
     # Group by Heizzentrale
     if "Heizzentrale" not in df.columns:
@@ -75,6 +104,8 @@ def calculate_kostenvergleich(df, params):
         row_first = group.iloc[0]
 
         # --- 1. Betriebskosten der bisherigen Versorgung (§9 WärmeLV) ---
+        # §9 (1): Durchschnitt des Energieverbrauchs der letzten 3 Abrechnungszeiträume
+        #          multipliziert mit dem Durchschnittspreis des letzten Abrechnungszeitraums
         brennstoff_kwh_col = "Brennstoff_kWh" if "Brennstoff_kWh" in group.columns else None
         if brennstoff_kwh_col:
             verbrauch_values = group[brennstoff_kwh_col].dropna()
@@ -85,7 +116,7 @@ def calculate_kostenvergleich(df, params):
             durchschnitt_verbrauch = 0
             anzahl_zeitraeume = 0
 
-        # Costs from last period with cost data
+        # Kosten des letzten Abrechnungszeitraums (Zeile mit Kostendaten)
         last_row = group.iloc[0]
         for _, r in group.iterrows():
             if r.get("Brennstoffkosten", 0) and r["Brennstoffkosten"] > 0:
@@ -96,43 +127,57 @@ def calculate_kostenvergleich(df, params):
         schornsteinfeger = last_row.get("Schornsteinfeger", 0) or 0
         betriebsstrom = last_row.get("Betriebsstrom", 0) or 0
 
-        # Calculate price per kWh from last period
+        # Durchschnittspreis des letzten Abrechnungszeitraums (ct/kWh)
         last_verbrauch = last_row.get("Brennstoff_kWh", 0) or 0
         if last_verbrauch > 0:
             preis_ct_kwh = (brennstoffkosten / last_verbrauch) * 100
         else:
             preis_ct_kwh = 0
 
-        # Verbrauchskosten nach §9(1)
+        # §9 (1): Verbrauchskosten = Ø Verbrauch × Durchschnittspreis letzter Zeitraum
         verbrauchskosten = durchschnitt_verbrauch * preis_ct_kwh / 100
 
-        # Sonstige Betriebskosten
+        # §9 (1): Sonstige Betriebskosten des letzten Abrechnungszeitraums
         sonstige_betriebskosten = wartung + schornsteinfeger + betriebsstrom
 
-        # Betriebskosten der bisherigen Versorgung (brutto)
+        # Betriebskosten der bisherigen Versorgung §8 Nr. 1 (brutto)
         betriebskosten_bisherig = verbrauchskosten + sonstige_betriebskosten
 
         # --- 2. Kosten der Wärmelieferung (§10 WärmeLV) ---
+        # Jahresnutzungsgrad der Altanlage (Pauschalwert BMVBS oder individuell)
         nutzungsgrad = get_nutzungsgrad(row_first, nutzungsgrade)
+
+        # Wärmemenge = Energieverbrauch (Durchschnitt) × Jahresnutzungsgrad Altanlage
         waermemenge = durchschnitt_verbrauch * nutzungsgrad
 
-        # Grundkosten (preisbereinigt)
-        gp_bereinigt = calculate_preisbereinigung_gp(grundpreis_netto, fix_gp, preisindizes_gp)
-        grundkosten_netto = gp_bereinigt * 12
-        grundkosten_brutto = grundkosten_netto * (1 + ust_satz)
+        # Warmwasser-Anteil berücksichtigen
+        warmwasser_aktiv = str(row_first.get("Warmwasser", "nein")).strip().lower() == "ja"
+        heizflaeche = row_first.get("Heizflaeche_m2", 0) or 0
+        waermemenge_gesamt = calculate_warmwasser_anteil(
+            waermemenge, warmwasser_aktiv, heizflaeche, ww_kwh_pro_m2
+        )
 
-        # Arbeitskosten (preisbereinigt)
+        # Wärmelieferpreise - standortspezifisch oder Default
+        grundpreis_netto = row_first.get("Grundpreis_netto", default_grundpreis) or default_grundpreis
+        arbeitspreis_netto = row_first.get("Arbeitspreis_netto", default_arbeitspreis) or default_arbeitspreis
+
+        # Grundkosten (preisbereinigt) §10
+        gp_bereinigt = calculate_preisbereinigung_gp(grundpreis_netto, fix_gp, preisindizes_gp)
+        grundkosten_netto_jahr = gp_bereinigt * 12  # Monatlich -> jährlich
+        grundkosten_brutto = grundkosten_netto_jahr * (1 + ust_satz)
+
+        # Arbeitskosten (preisbereinigt) §10
         ap_bereinigt = calculate_preisbereinigung_ap(arbeitspreis_netto, fix_ap, preisindizes_ap)
-        arbeitskosten_netto = waermemenge * ap_bereinigt / 100
+        arbeitskosten_netto = waermemenge_gesamt * ap_bereinigt / 100  # ct/kWh -> €
         arbeitskosten_brutto = arbeitskosten_netto * (1 + ust_satz)
 
-        # Gesamtkosten Wärmelieferung
+        # Gesamtkosten Wärmelieferung §8 Nr. 2
+        kosten_waermelieferung_netto = grundkosten_netto_jahr + arbeitskosten_netto
         kosten_waermelieferung_brutto = grundkosten_brutto + arbeitskosten_brutto
 
-        # --- Ergebnis ---
+        # --- Ergebnis §8: Kosten WL dürfen Betriebskosten nicht übersteigen ---
         bestanden = kosten_waermelieferung_brutto <= betriebskosten_bisherig
-
-        heizflaeche = row_first.get("Heizflaeche_m2", 0) or 0
+        differenz = betriebskosten_bisherig - kosten_waermelieferung_brutto
 
         results.append({
             "Heizzentrale": site,
@@ -140,18 +185,23 @@ def calculate_kostenvergleich(df, params):
             "Technologie": row_first.get("Technologie", ""),
             "Leistung_kW": row_first.get("Leistung_kW", 0),
             "Heizflaeche_m2": heizflaeche,
+            "Warmwasser": "ja" if warmwasser_aktiv else "nein",
             "Anzahl_Zeitraeume": anzahl_zeitraeume,
             "Durchschnitt_Verbrauch_kWh": round(durchschnitt_verbrauch, 0),
             "Nutzungsgrad": nutzungsgrad,
-            "Waermemenge_kWh": round(waermemenge, 0),
-            "Preis_ct_kWh": round(preis_ct_kwh, 3),
-            "Verbrauchskosten": round(verbrauchskosten, 2),
-            "Sonstige_Betriebskosten": round(sonstige_betriebskosten, 2),
+            "Waermemenge_Heizung_kWh": round(waermemenge, 0),
+            "Waermemenge_gesamt_kWh": round(waermemenge_gesamt, 0),
+            "Preis_ct_kWh_Brennstoff": round(preis_ct_kwh, 3),
+            "Verbrauchskosten_S9": round(verbrauchskosten, 2),
+            "Sonstige_Betriebskosten_S9": round(sonstige_betriebskosten, 2),
             "Betriebskosten_bisherig_brutto": round(betriebskosten_bisherig, 2),
+            "Grundpreis_Angebot_netto": round(grundpreis_netto, 2),
+            "Arbeitspreis_Angebot_netto_ct": round(arbeitspreis_netto, 3),
             "Grundkosten_brutto": round(grundkosten_brutto, 2),
             "Arbeitskosten_brutto": round(arbeitskosten_brutto, 2),
             "Kosten_Waermelieferung_brutto": round(kosten_waermelieferung_brutto, 2),
-            "Ergebnis": "\u2705 Bestanden" if bestanden else "\u274c Nicht bestanden",
+            "Differenz_Euro": round(differenz, 2),
+            "Ergebnis": "✅ §8 erfüllt" if bestanden else "❌ §8 nicht erfüllt",
         })
 
     return pd.DataFrame(results)
