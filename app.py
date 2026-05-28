@@ -69,7 +69,7 @@ if st.session_state.get("current_project"):
 
 st.markdown("---")
 
-# --- Sidebar: Default-Parameter (werden pro Standort überschreibbar) ---
+# --- Sidebar: Default-Parameter ---
 st.sidebar.header("⚙️ Default-Parameter")
 st.sidebar.markdown("*Gelten für alle Standorte, sofern nicht individuell überschrieben*")
 
@@ -94,8 +94,8 @@ default_grundpreis = st.sidebar.number_input("GPB – Grundpreis Basis (€/Mona
 default_arbeitspreis = st.sidebar.number_input("APB – Arbeitspreis Basis (ct/kWh netto)", value=0.0, step=0.1)
 
 st.sidebar.subheader("Preisgleitklausel")
-st.sidebar.latex(r"GP = GPB \times (FixGP + G_1 \cdot \frac{GP_1}{GP_{1B}} + G_2 \cdot \frac{GP_2}{GP_{2B}} + \ldots)")
-st.sidebar.latex(r"AP = APB \times (FixAP + A_1 \cdot \frac{AP_1}{AP_{1B}} + A_2 \cdot \frac{AP_2}{AP_{2B}} + \ldots)")
+st.sidebar.latex(r"GP = GPB \times (FixGP + G_1 \cdot \frac{GP_1}{GP_{1B}} + \ldots)")
+st.sidebar.latex(r"AP = APB \times (FixAP + A_1 \cdot \frac{AP_1}{AP_{1B}} + \ldots)")
 
 fix_gp = st.sidebar.number_input("FixGP", value=0.0, step=0.01, format="%.4f")
 fix_ap = st.sidebar.number_input("FixAP", value=0.0, step=0.01, format="%.4f")
@@ -156,6 +156,8 @@ with tab1:
         df = import_data(uploaded_file)
         if df is not None:
             st.session_state["imported_data"] = df
+            # Clear old results when new data is imported
+            st.session_state.pop("results", None)
 
     # Show imported data
     if st.session_state.get("imported_data") is not None:
@@ -180,44 +182,45 @@ with tab1:
                     if "Abrechnungsperiode" in site_data.columns:
                         perioden = site_data["Abrechnungsperiode"].dropna().tolist()
                         if perioden:
-                            st.markdown("**Abrechnungsperioden:**")
+                            st.markdown("**📅 Abrechnungsperioden:**")
                             for i, p in enumerate(perioden):
-                                verbrauch = site_data.iloc[i].get("Brennstoff_kWh", 0)
-                                st.write(f"  📅 {p} — {verbrauch:,.0f} kWh")
+                                verbrauch = site_data.iloc[i].get("Brennstoff_kWh", 0) if i < len(site_data) else 0
+                                st.write(f"  • {p} — {verbrauch:,.0f} kWh")
 
                     sc1, sc2, sc3 = st.columns(3)
                     with sc1:
                         st.markdown("**Anlagenparameter**")
                         site_betriebsstunden = st.number_input(
-                            "Betriebsstunden (h/a)", value=sp.get("betriebsstunden", default_betriebsstunden),
+                            "Betriebsstunden (h/a)", value=int(sp.get("betriebsstunden", default_betriebsstunden) or 0),
                             step=100, key=f"bst_{site}",
                             help="Für Umrechnung kW → kWh")
+                        site_nutzungsgrad_val = sp.get("nutzungsgrad", 0) or 0
                         site_nutzungsgrad = st.number_input(
-                            "Nutzungsgrad (%)", value=sp.get("nutzungsgrad", 0.0) * 100 if sp.get("nutzungsgrad") else 0.0,
+                            "Nutzungsgrad (%)", value=float(site_nutzungsgrad_val * 100),
                             step=0.5, key=f"ng_{site}",
                             help="0 = automatisch aus Technologie") / 100
                         site_ww = st.number_input(
-                            "WW-Pauschale (kWh/m²/a)", value=sp.get("ww_kwh_pro_m2", ww_kwh_pro_m2),
+                            "WW-Pauschale (kWh/m²/a)", value=float(sp.get("ww_kwh_pro_m2", ww_kwh_pro_m2)),
                             step=1.0, key=f"ww_{site}")
 
                     with sc2:
                         st.markdown("**Angebotspreise WL**")
                         site_gp = st.number_input(
-                            "GPB (€/Monat netto)", value=sp.get("grundpreis_netto", 0.0),
+                            "GPB (€/Monat netto)", value=float(sp.get("grundpreis_netto", 0) or 0),
                             step=10.0, key=f"gp_{site}",
                             help="0 = Default aus Sidebar")
                         site_ap = st.number_input(
-                            "APB (ct/kWh netto)", value=sp.get("arbeitspreis_netto", 0.0),
+                            "APB (ct/kWh netto)", value=float(sp.get("arbeitspreis_netto", 0) or 0),
                             step=0.1, key=f"ap_{site}",
                             help="0 = Default aus Sidebar")
 
                     with sc3:
                         st.markdown("**Preisgleitklausel**")
                         site_fix_gp = st.number_input(
-                            "FixGP", value=sp.get("fix_gp", fix_gp),
+                            "FixGP", value=float(sp.get("fix_gp", fix_gp)),
                             step=0.01, format="%.4f", key=f"sfgp_{site}")
                         site_fix_ap = st.number_input(
-                            "FixAP", value=sp.get("fix_ap", fix_ap),
+                            "FixAP", value=float(sp.get("fix_ap", fix_ap)),
                             step=0.01, format="%.4f", key=f"sfap_{site}")
 
                     # Save site params
@@ -229,7 +232,7 @@ with tab1:
                         "arbeitspreis_netto": site_ap if site_ap > 0 else None,
                         "fix_gp": site_fix_gp,
                         "fix_ap": site_fix_ap,
-                        "preisindizes_gp": preisindizes_gp,  # Use global for now
+                        "preisindizes_gp": preisindizes_gp,
                         "preisindizes_ap": preisindizes_ap,
                     }
 
@@ -257,11 +260,19 @@ with tab2:
         m2.metric("§8 erfüllt ✅", n_bestanden)
         m3.metric("§8 nicht erfüllt ❌", n_nicht)
 
-        # Übersichtstabelle
-        summary = results[["Heizzentrale", "Abrechnungsperioden", "Betriebskosten_bisherig_brutto",
-                         "Kosten_Waermelieferung_brutto", "Differenz_Euro", "Ergebnis"]].copy()
-        summary.columns = ["Standort", "Abrechnungsperioden", "§9 Bisherige Kosten (€/a)",
-                         "§10 Wärmelieferung (€/a)", "Differenz (€/a)", "Ergebnis §8"]
+        # Übersichtstabelle - nur vorhandene Spalten verwenden
+        summary_cols = ["Heizzentrale", "Betriebskosten_bisherig_brutto",
+                       "Kosten_Waermelieferung_brutto", "Differenz_Euro", "Ergebnis"]
+        summary_names = ["Standort", "§9 Bisherige Kosten (€/a)",
+                        "§10 Wärmelieferung (€/a)", "Differenz (€/a)", "Ergebnis §8"]
+
+        # Abrechnungsperioden einfügen wenn vorhanden
+        if "Abrechnungsperioden" in results.columns:
+            summary_cols.insert(1, "Abrechnungsperioden")
+            summary_names.insert(1, "Perioden")
+
+        summary = results[summary_cols].copy()
+        summary.columns = summary_names
 
         def highlight_result(val):
             if "erfüllt" in str(val) and "nicht" not in str(val):
@@ -280,10 +291,12 @@ with tab2:
         for idx, row in results_show.iterrows():
             with st.expander(f"{'✅' if 'nicht' not in row['Ergebnis'] else '❌'} {row['Heizzentrale']}", expanded=(standort_filter != "Alle")):
                 # Abrechnungsperioden klar darstellen
-                if row.get("Abrechnungsperioden"):
+                perioden_str = row.get("Abrechnungsperioden", "")
+                if perioden_str:
                     st.markdown("**📅 Abrechnungsperioden:**")
-                    for p in str(row["Abrechnungsperioden"]).split(" | "):
-                        st.write(f"  • {p}")
+                    for p in str(perioden_str).split(" | "):
+                        if p.strip():
+                            st.write(f"  • {p.strip()}")
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
@@ -294,7 +307,7 @@ with tab2:
                     st.write(f"Brennstoffpreis: {row['Preis_ct_kWh_Brennstoff']:.2f} ct/kWh")
                     st.write(f"Verbrauchskosten: {row['Verbrauchskosten_S9']:.2f} €/a")
                     st.write(f"Sonstige Kosten: {row['Sonstige_Betriebskosten_S9']:.2f} €/a")
-                    if row.get("Betriebsstunden", 0) > 0:
+                    if row.get("Betriebsstunden", 0) and row["Betriebsstunden"] > 0:
                         st.write(f"Betriebsstunden: {row['Betriebsstunden']} h/a")
 
                 with c2:
@@ -318,8 +331,16 @@ with tab2:
                 # Formel-Anzeige
                 st.markdown("---")
                 st.markdown("**📐 Angewandte Preisformeln:**")
-                st.code(row.get("Formel_GP", ""), language=None)
-                st.code(row.get("Formel_AP", ""), language=None)
+                formel_gp = row.get("Formel_GP", "")
+                formel_ap = row.get("Formel_AP", "")
+                if formel_gp:
+                    st.code(formel_gp, language=None)
+                else:
+                    st.code("GP = (keine Preisgleitklausel konfiguriert)", language=None)
+                if formel_ap:
+                    st.code(formel_ap, language=None)
+                else:
+                    st.code("AP = (keine Preisgleitklausel konfiguriert)", language=None)
 
         # Export
         st.subheader("Export")
