@@ -24,9 +24,14 @@ COLUMN_MAPPING = {
     "zeitraum": "Abrechnungsperiode",
     "periode": "Abrechnungsperiode",
     "brennstoff kwh": "Brennstoff_kWh",
-    "brennstoff kw/h": "Brennstoff_kWh",
     "verbrauch kwh": "Brennstoff_kWh",
-    "energieverbrauch": "Brennstoff_kWh",
+    "energieverbrauch kwh": "Brennstoff_kWh",
+    "brennstoff kw/h": "Brennstoff_kW",
+    "brennstoff kw": "Brennstoff_kW",
+    "leistung brennstoff": "Brennstoff_kW",
+    "energieverbrauch": "Brennstoff_kW",
+    "betriebsstunden": "Betriebsstunden",
+    "vollbenutzungsstunden": "Betriebsstunden",
     "brennstoffkosten": "Brennstoffkosten",
     "energiekosten": "Brennstoffkosten",
     "wartung": "Wartung",
@@ -43,7 +48,14 @@ COLUMN_MAPPING = {
 
 
 def parse_german_number(value):
-    """Parse German number format (1.234,56 €) to float."""
+    """Parse German number format (1.234,56 €) to float.
+    
+    Handles:
+    - 96.168 (German thousands separator, 3 digits after dot) -> 96168
+    - 1.234,56 -> 1234.56
+    - 13.232,82 -> 13232.82
+    - 104.343 -> 104343
+    """
     if pd.isna(value):
         return 0.0
     if isinstance(value, (int, float)):
@@ -51,11 +63,22 @@ def parse_german_number(value):
     s = str(value).strip()
     # Remove currency symbols and whitespace
     s = re.sub(r'[€$\s]', '', s)
-    # Handle German format: 1.234,56 -> 1234.56
+    if not s:
+        return 0.0
+    # Handle German format
     if ',' in s and '.' in s:
+        # 1.234,56 -> 1234.56 (dot is thousands, comma is decimal)
         s = s.replace('.', '').replace(',', '.')
     elif ',' in s:
+        # 1234,56 -> 1234.56 (comma is decimal)
         s = s.replace(',', '.')
+    elif '.' in s:
+        # Ambiguous: could be 96.168 (=96168) or 96.5 (=96.5)
+        # Heuristic: if exactly 3 digits after dot -> thousands separator
+        parts = s.split('.')
+        if len(parts) == 2 and len(parts[1]) == 3 and len(parts[0]) >= 1:
+            # 96.168 -> 96168, 104.343 -> 104343
+            s = s.replace('.', '')
     try:
         return float(s)
     except (ValueError, TypeError):
@@ -72,6 +95,26 @@ def parse_leistung(value):
     if match:
         return parse_german_number(match.group(1))
     return 0.0
+
+
+def detect_energy_column_type(df, original_cols):
+    """Detect whether energy data is in kW or kWh based on column headers.
+    
+    'Brennstoff KW/h' = kW (Leistung, braucht Betriebsstunden)
+    'Brennstoff kWh' = kWh (Arbeit, direkt nutzbar)
+    
+    Returns:
+        'kW' if values are power needing Betriebsstunden
+        'kWh' if values are energy directly usable
+    """
+    for col in original_cols:
+        col_lower = col.strip().lower()
+        # "kw/h" ist NICHT kWh - es ist kW (Leistung)!
+        if 'kw/h' in col_lower:
+            return 'kW'
+        if 'kwh' in col_lower and 'kw/h' not in col_lower:
+            return 'kWh'
+    return 'kW'  # Default: assume kW (safer, forces user to enter Betriebsstunden)
 
 
 def map_columns(df):
@@ -97,7 +140,6 @@ def import_data(uploaded_file):
     try:
         filename = uploaded_file.name.lower()
         if filename.endswith(".csv"):
-            # Try different separators
             content = uploaded_file.read().decode("utf-8", errors="replace")
             for sep in [";", ",", "\t", "|"]:
                 try:
@@ -109,13 +151,26 @@ def import_data(uploaded_file):
         else:
             df = pd.read_excel(uploaded_file)
 
+        # Store original column names for energy unit detection
+        original_cols = list(df.columns)
+        energy_type = detect_energy_column_type(df, original_cols)
+
         # Map columns
         df = map_columns(df)
 
+        # If energy type is kW, ensure column is named Brennstoff_kW (not kWh)
+        if energy_type == 'kW':
+            if "Brennstoff_kWh" in df.columns and "Brennstoff_kW" not in df.columns:
+                df = df.rename(columns={"Brennstoff_kWh": "Brennstoff_kW"})
+
+        # Store energy type as attribute
+        df.attrs['energy_type'] = energy_type
+
         # Parse numeric columns
-        numeric_cols = ["Brennstoff_kWh", "Brennstoffkosten", "Wartung",
+        numeric_cols = ["Brennstoff_kWh", "Brennstoff_kW", "Brennstoffkosten", "Wartung",
                        "Schornsteinfeger", "Betriebsstrom", "Summe",
-                       "Heizflaeche_m2", "Euro_m2_Monat", "Verbrauch_kWh_m2"]
+                       "Heizflaeche_m2", "Euro_m2_Monat", "Verbrauch_kWh_m2",
+                       "Betriebsstunden"]
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = df[col].apply(parse_german_number)
