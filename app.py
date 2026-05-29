@@ -230,12 +230,20 @@ with tab1:
                 with st.expander(f"⚙️ {site}", expanded=False):
                     # Abrechnungsperioden anzeigen
                     if "Abrechnungsperiode" in site_data.columns:
-                        perioden = site_data["Abrechnungsperiode"].dropna().tolist()
-                        if perioden:
+                        period_rows = site_data[site_data["Abrechnungsperiode"].notna()]
+                        if not period_rows.empty:
                             st.markdown("**📅 Abrechnungsperioden:**")
-                            for i, p in enumerate(perioden):
-                                verbrauch = site_data.iloc[i].get("Brennstoff_kWh", 0) if i < len(site_data) else 0
-                                st.write(f"  • {p} — {verbrauch:,.0f} kWh")
+                            for _, prow in period_rows.iterrows():
+                                p = prow["Abrechnungsperiode"]
+                                if "Brennstoff_kWh" in site_data.columns:
+                                    verbrauch = prow.get("Brennstoff_kWh") or 0
+                                    unit = "kWh"
+                                elif "Brennstoff_kW" in site_data.columns:
+                                    verbrauch = prow.get("Brennstoff_kW") or 0
+                                    unit = "kW"
+                                else:
+                                    verbrauch, unit = 0, "kWh"
+                                st.write(f"  • {p} — {verbrauch:,.0f} {unit}")
 
                     sc1, sc2, sc3 = st.columns(3)
                     with sc1:
@@ -244,6 +252,19 @@ with tab1:
                             "Betriebsstunden (h/a)", value=int(sp.get("betriebsstunden", default_betriebsstunden) or 0),
                             step=100, key=f"bst_{site}",
                             help="Für Umrechnung kW → kWh")
+                        # Live kWh-Vorschau wenn Verbrauch in kW vorliegt
+                        if "Brennstoff_kW" in site_data.columns:
+                            kw_vals = site_data["Brennstoff_kW"].dropna()
+                            kw_vals = kw_vals[kw_vals > 0]
+                            if len(kw_vals) > 0:
+                                if site_betriebsstunden > 0:
+                                    kwh_preview = kw_vals * site_betriebsstunden
+                                    st.success(
+                                        f"⚡ Ø **{kwh_preview.mean():,.0f} kWh/a**  \n"
+                                        f"({kw_vals.mean():,.1f} kW × {site_betriebsstunden} h/a, {len(kw_vals)} Zeitraum/e)"
+                                    )
+                                else:
+                                    st.warning("⚠️ Verbrauch in **kW** erkannt – Betriebsstunden eintragen!")
                         site_nutzungsgrad_val = sp.get("nutzungsgrad", 0) or 0
                         site_nutzungsgrad = st.number_input(
                             "Nutzungsgrad (%)", value=float(site_nutzungsgrad_val * 100),
@@ -327,9 +348,17 @@ with tab1:
             # Berechnung starten
             st.markdown("---")
             if st.button("🔄 Alle Standorte berechnen", type="primary"):
-                results = calculate_kostenvergleich(df, params, st.session_state.get("site_params", {}))
-                st.session_state["results"] = results
-                st.rerun()
+                try:
+                    results = calculate_kostenvergleich(df, params, st.session_state.get("site_params", {}))
+                    if results.empty:
+                        st.error("⚠️ Berechnung lieferte keine Ergebnisse. Prüfe ob 'Heizzentrale'-Spalte vorhanden ist und Daten korrekt importiert wurden.")
+                    else:
+                        st.session_state["results"] = results
+                        st.rerun()
+                except Exception as e:
+                    import traceback
+                    st.error(f"❌ Fehler bei der Berechnung: {e}")
+                    st.code(traceback.format_exc())
         else:
             st.warning("Spalte 'Heizzentrale' nicht erkannt.")
             st.dataframe(df.head(), use_container_width=True)
